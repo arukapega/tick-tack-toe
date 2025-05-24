@@ -34,6 +34,7 @@ public:
 public:
 	enum type {
 		TYPE_ORDERED = 0,
+		TYPE_NEGAMAX = 1
 	};
 
 	static AI* createAi(type type);
@@ -48,10 +49,21 @@ public:
 	bool think(Board& b);
 };
 
+class AI_negaMax : public AI {
+	int evaluate(Board& b, Mass::status current, int& best_x, int& best_y);
+public:
+	AI_negaMax() {}
+	~AI_negaMax() {}
+
+	bool think(Board& b);
+};
+
 AI* AI::createAi(type type)
 {
 	switch (type) {
-		// case TYPE_ORDERED:
+		case TYPE_NEGAMAX:
+			return new AI_negaMax();
+			break;
 	default:
 		return new AI_ordered();
 		break;
@@ -63,6 +75,7 @@ AI* AI::createAi(type type)
 class Board
 {
 	friend class AI_ordered;
+	friend class AI_negaMax;
 
 public:
 	enum WINNER {
@@ -193,12 +206,49 @@ bool AI_ordered::think(Board& b)
 	return false;
 }
 
+int AI_negaMax::evaluate(Board& b, Mass::status current, int& best_x, int& best_y) {
+	Mass::status next = current == Mass::status::ENEMY ? Mass::status::PLAYER : Mass::status::ENEMY;
+
+	int r = b.calc_result();
+	if (r == current) return +10000;
+	if (r == next) return -10000;
+	if (r == Board::DRAW) return 0;
+	int score_max = -10001;
+
+	for (int y = 0; y < Board::BOARD_SIZE; y++) {
+		for (int x = 0; x < Board::BOARD_SIZE; x++) {
+			Mass& m = b.mass_[x][y];
+			if (m.getStatus() != Mass::BLANK) continue;
+
+			//このマスにうったと仮定する
+			m.setStatus(current);
+			int dummy;
+			int score = -evaluate(b, next, dummy, dummy);
+			m.setStatus(Mass::BLANK);
+
+			if (score_max < score) {
+				score_max = score;
+				best_x = x;
+				best_y = y;
+			}
+		}
+	}
+	return score_max;
+}
+bool AI_negaMax::think(Board& b)
+{
+	int x = -1, y=0;
+	evaluate(b, Mass::status::ENEMY, x, y);
+
+	if (x < 0) return false;
+	return b.mass_[x][y].put(Mass::ENEMY);
+}
 
 
 class Game
 {
 private:
-	const AI::type ai_type = AI::TYPE_ORDERED;
+	const AI::type ai_type = AI::TYPE_NEGAMAX;
 
 	Board board_;
 	Board::WINNER winner_ = Board::NOT_FINISED;
