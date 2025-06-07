@@ -36,7 +36,8 @@ public:
 		TYPE_ORDERED = 0,
 		TYPE_NEGAMAX = 1,
 		TYPE_NEGAMAX_ALPHA = 2,
-		TYPE_MONTE_CARLO = 3
+		TYPE_MONTE_CARLO = 3,
+		TYPE_MONTECARLO_TREE = 4
 	};
 
 	static AI* createAi(type type);
@@ -78,6 +79,15 @@ public:
 
 	bool think(Board& b);
 };
+class AI_montecarlo_tree : public AI {
+	static int select_mass(int n, int *a_count, int *a_wins);
+	int evaluate(bool all_search,int count, Board& b, Mass::status current, int& best_x, int& best_y);
+public:
+	AI_montecarlo_tree() {}
+	~AI_montecarlo_tree() {}
+
+	bool think(Board& b);
+};
 AI* AI::createAi(type type)
 {
 	switch (type) {
@@ -89,6 +99,9 @@ AI* AI::createAi(type type)
 			break;
 		case TYPE_MONTE_CARLO:
 			return new AI_monte_carlo();
+			break; 
+		case TYPE_MONTECARLO_TREE:
+			return new AI_montecarlo_tree();
 			break;
 	default:
 		return new AI_ordered();
@@ -104,6 +117,7 @@ class Board
 	friend class AI_negaMax;
 	friend class AI_negaMax_alpha;
 	friend class AI_monte_carlo;
+	friend class AI_montecarlo_tree;
 
 public:
 	enum WINNER {
@@ -353,6 +367,7 @@ int AI_monte_carlo::evaluate(bool first_time,Board& board, Mass::status current,
 	if (first_time) {
 		//10000回、ランダムに配置可能なマスから調べる
 		for (int i = 0; i < 10000; i++) {
+			//ランダムなので最善を返す保証はない
 			int idx = rand() % blank_mass_num;
 			Mass& m = board.mass_[y_table[idx]][x_table[idx]];
 
@@ -428,10 +443,144 @@ bool AI_negaMax_alpha::think(Board& b)
 	return b.mass_[x][y].put(Mass::ENEMY);
 }
 
+int AI_montecarlo_tree::evaluate(bool all_search,int sim_count, Board& board, Mass::status current, int& best_x, int& best_y) {
+	Mass::status next = (current == Mass::status::ENEMY) ? Mass::status::PLAYER : Mass::status::ENEMY;
+
+	int r = board.calc_result();
+
+	if (r == current) return +100;
+	if (r == next) return -100;
+	if (r == Board::DRAW) return 0;
+
+
+	//x,yのマスのテーブル(空いているマス)
+	char x_table[Board::BOARD_SIZE * Board::BOARD_SIZE];
+	char y_table[Board::BOARD_SIZE * Board::BOARD_SIZE];
+	//勝ち負け
+	int wins[Board::BOARD_SIZE * Board::BOARD_SIZE];
+	int count[Board::BOARD_SIZE * Board::BOARD_SIZE];
+	int scores[Board::BOARD_SIZE * Board::BOARD_SIZE];
+	//空きマスの合計
+	int blank_mass_num = 0;
+
+	for (int y = 0; y < Board::BOARD_SIZE; y++) {
+		for (int x = 0; x < Board::BOARD_SIZE; x++) {
+			Mass& m = board.mass_[y][x];
+			if (m.getStatus() == Mass::BLANK)//配置できるなら
+			{
+				//x,yテーブルに空きマスを代入、勝ち負けを初期化する
+				x_table[blank_mass_num] = x;
+				y_table[blank_mass_num] = y;
+				wins[blank_mass_num] = count[blank_mass_num] = 0;
+				scores[blank_mass_num] = -1;
+				blank_mass_num++;
+			}
+		}
+	}
+
+	//thinkで最初に呼ばれたときに限り
+	if (all_search) {
+		//10000回、ランダムに配置可能なマスから調べる
+		for (int i = 0; i < sim_count; i++) {
+			//ランダムなので最善を返す保証はない
+			int idx = select_mass( blank_mass_num, count, wins);
+			if (idx < 0) break;
+			Mass& m = board.mass_[y_table[idx]][x_table[idx]];
+
+			//ランダムなマスに配置した際の勝敗を求める
+			m.setStatus(current);
+			int dummy;
+			int score = -evaluate(false,0, board, next, dummy, dummy);
+			m.setStatus(Mass::BLANK);
+
+			//勝敗判定
+			if (0 < score) {
+				wins[idx]++;
+				count[idx]++;
+			}
+			else {
+				count[idx]++;
+			}
+
+			if (sim_count / 10 < count[idx]
+				&& 10 < sim_count) {
+				m.setStatus(current);
+				scores[idx] = 100 - evaluate(true, (int)sqrt(sim_count), board, next, dummy, dummy);
+				m.setStatus(Mass::BLANK);
+				wins[idx] = -1;
+			}
+		}
+		int score_max = -9999;
+		for (int idx = 0; idx < blank_mass_num; idx++) {
+			int score;
+			if (-1 == wins[idx]) {
+				score = scores[idx];
+			}
+			else if (0 == count[idx]) {
+				score = 0;
+			}
+			else {
+				double c = 1 * sqrt(2 * log(sim_count) / count[idx]);
+				score = 100 * wins[idx] / count[idx] + (int)(c);
+			}
+
+			if (score_max < score)//今回評価したスコアの方が大きいなら更新
+			{
+				score_max = score;
+				best_x = x_table[idx];
+				best_y = y_table[idx];
+				//std::cout << "以下のマスが最高スコアに更新する\n";
+
+			}
+			std::cout << x_table[idx] + 1 << (char)('a' + y_table[idx]) << " score::" << score << "\n";
+		}
+
+		return score_max;
+	}
+
+	//all_serachではないので、勝敗をカウントはしない、勝率も求めない
+	//ただこのノードにおける残りの空きますに配置した時の評価を求める
+	int idx = rand() % blank_mass_num;
+	Mass& m = board.mass_[y_table[idx]][x_table[idx]];
+	m.setStatus(current);
+	int dummy;
+	int score = -evaluate(false,0, board, next, dummy, dummy);
+	m.setStatus(Mass::BLANK);
+
+	return score;
+}
+int AI_montecarlo_tree::select_mass(int n, int *a_count, int *a_wins)
+{
+	int total = 0;
+	for (int i = 0; i < n; i++) {
+		total += 10000 * (a_wins[i] + 1) / (a_count[i] + 1);
+	}
+	if (total <= 0) return -1;
+
+	int r = rand() % total;
+	for (int i = 0; i < n; i++) {
+		r -= 10000 * (a_wins[i] + 1) / (a_count[i] + 1);
+		if (r < 0) {
+			return i;
+		}
+	}
+	return -1;
+}
+bool AI_montecarlo_tree::think(Board& b)
+{
+	int x = -1, y = 0;
+	evaluate(true, 10000, b, Mass::ENEMY, x, y);
+
+	std::cout << "evaluate内のループの中が呼ばれた回数は: " << calcCount << std::endl;
+	//
+
+	if (x < 0) return false;
+	return b.mass_[y][x].put(Mass::ENEMY);
+}
 class Game
 {
 private:
-	const AI::type ai_type = AI::TYPE_MONTE_CARLO;
+	const AI::type ai_type = AI::TYPE_MONTECARLO_TREE;
 
 	Board board_;
 	Board::WINNER winner_ = Board::NOT_FINISED;
