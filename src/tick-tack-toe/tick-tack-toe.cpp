@@ -1,6 +1,6 @@
 ﻿#include <memory>
 #include <iostream>
-
+#include <chrono>
 
 class Mass {
 public:
@@ -34,10 +34,13 @@ public:
 public:
 	enum type {
 		TYPE_ORDERED = 0,
-		TYPE_NEGAMAX = 1
+		TYPE_NEGAMAX = 1,
+		TYPE_NEGAMAX_ALPHA = 2,
+		TYPE_MONTE_CARLO = 3
 	};
 
 	static AI* createAi(type type);
+	int calcCount;
 };
 
 // 順番に打ってみる
@@ -50,6 +53,7 @@ public:
 };
 
 class AI_negaMax : public AI {
+protected:
 	int evaluate(Board& b, Mass::status current, int& best_x, int& best_y);
 public:
 	AI_negaMax() {}
@@ -57,12 +61,34 @@ public:
 
 	bool think(Board& b);
 };
+class AI_negaMax_alpha : public AI {
+	int evaluate(Board& b, Mass::status current, int& best_x, int& best_y, int alpha, int beta);
+public:
+	AI_negaMax_alpha() {}
+	~AI_negaMax_alpha() {}
 
+	bool think(Board& b);
+};
+
+class AI_monte_carlo : public AI {
+	int evaluate(bool fiest_time,Board& b, Mass::status current, int& best_x, int& best_y);
+public:
+	AI_monte_carlo() {}
+	~AI_monte_carlo() {}
+
+	bool think(Board& b);
+};
 AI* AI::createAi(type type)
 {
 	switch (type) {
 		case TYPE_NEGAMAX:
 			return new AI_negaMax();
+			break;
+		case TYPE_NEGAMAX_ALPHA:
+			return new AI_negaMax_alpha();
+			break;
+		case TYPE_MONTE_CARLO:
+			return new AI_monte_carlo();
 			break;
 	default:
 		return new AI_ordered();
@@ -74,8 +100,10 @@ AI* AI::createAi(type type)
 
 class Board
 {
-	friend class AI_ordered;
+	friend class AI_ordered; 
 	friend class AI_negaMax;
+	friend class AI_negaMax_alpha;
+	friend class AI_monte_carlo;
 
 public:
 	enum WINNER {
@@ -205,6 +233,56 @@ bool AI_ordered::think(Board& b)
 	}
 	return false;
 }
+int AI_negaMax_alpha::evaluate(Board& b, Mass::status current, int& best_x, int& best_y, int alpha, int beta) {
+	Mass::status next = current == Mass::status::ENEMY ? Mass::status::PLAYER : Mass::status::ENEMY;
+
+	int r = b.calc_result();
+	if (r == current) return +10000;
+	if (r == next) return -10000;
+	if (r == Board::DRAW) return 0;
+
+	int score_max = -10001;
+
+	for (int y = 0; y < Board::BOARD_SIZE; y++) {
+		for (int x = 0; x < Board::BOARD_SIZE; x++) {
+			calcCount++;
+			Mass& m = b.mass_[x][y];
+			if (m.getStatus() != Mass::BLANK) continue;
+
+			// このマスにうったと仮定する
+			m.setStatus(current);
+			int dummy_x, dummy_y;
+			int score = -evaluate(b, next, dummy_x, dummy_y, -beta, -alpha);
+			m.setStatus(Mass::BLANK);
+
+			if (score > score_max) {
+				score_max = score;
+				best_x = x;
+				best_y = y;
+			}
+			//現在探索中の枝に置ける、最高スコアを求める
+			alpha = std::max(alpha, score);
+			if (alpha >= beta)//beta(これ以上は選ばれないとわかっているスコア)以上なら、もう探索する必要はない
+			{
+				//その時点でのスコアを返す
+				return score_max;
+			}
+		}
+	}
+	return score_max;
+}
+
+bool AI_negaMax::think(Board& b)
+{
+	int x = -1, y=0;
+	calcCount = 0;
+	evaluate(b, Mass::status::ENEMY, x, y);
+	std::cout << "evaluate内のループの中が呼ばれた回数は: " << calcCount << std::endl;
+	//287757回
+
+	if (x < 0) return false;
+	return b.mass_[x][y].put(Mass::ENEMY);
+}
 
 int AI_negaMax::evaluate(Board& b, Mass::status current, int& best_x, int& best_y) {
 	Mass::status next = current == Mass::status::ENEMY ? Mass::status::PLAYER : Mass::status::ENEMY;
@@ -215,8 +293,10 @@ int AI_negaMax::evaluate(Board& b, Mass::status current, int& best_x, int& best_
 	if (r == Board::DRAW) return 0;
 	int score_max = -10001;
 
+
 	for (int y = 0; y < Board::BOARD_SIZE; y++) {
 		for (int x = 0; x < Board::BOARD_SIZE; x++) {
+			calcCount++;
 			Mass& m = b.mass_[x][y];
 			if (m.getStatus() != Mass::BLANK) continue;
 
@@ -226,6 +306,7 @@ int AI_negaMax::evaluate(Board& b, Mass::status current, int& best_x, int& best_
 			int score = -evaluate(b, next, dummy, dummy);
 			m.setStatus(Mass::BLANK);
 
+			//現ノードの中で報酬が最も多いか？
 			if (score_max < score) {
 				score_max = score;
 				best_x = x;
@@ -235,20 +316,122 @@ int AI_negaMax::evaluate(Board& b, Mass::status current, int& best_x, int& best_
 	}
 	return score_max;
 }
-bool AI_negaMax::think(Board& b)
+int AI_monte_carlo::evaluate(bool first_time,Board& board, Mass::status current, int& best_x, int& best_y) {
+	Mass::status next = (current == Mass::status::ENEMY) ? Mass::status::PLAYER : Mass::status::ENEMY;
+
+	int r = board.calc_result();
+	
+	if (r == current) return +10000;
+	if (r == next) return -10000;
+	if (r == Board::DRAW) return 0;
+
+
+	//x,yのマスのテーブル(空いているマス)
+	char x_table[Board::BOARD_SIZE * Board::BOARD_SIZE];
+	char y_table[Board::BOARD_SIZE * Board::BOARD_SIZE];
+	//勝ち負け
+	int wins[Board::BOARD_SIZE * Board::BOARD_SIZE];
+	int loses[Board::BOARD_SIZE * Board::BOARD_SIZE];
+	//空きマスの合計
+	int blank_mass_num = 0;
+
+	for (int y = 0; y < Board::BOARD_SIZE; y++) {
+		for (int x = 0; x < Board::BOARD_SIZE; x++) {
+			Mass &m = board.mass_[y][x];
+			if (m.getStatus() == Mass::BLANK)//配置できるなら
+			{
+				//x,yテーブルに空きマスを代入、勝ち負けを初期化する
+				x_table[blank_mass_num] = x;
+				y_table[blank_mass_num] = y;
+				wins[blank_mass_num] = loses[blank_mass_num] = 0;
+				blank_mass_num++;
+			}
+		}
+	}
+
+	//thinkで最初に呼ばれたときに限り
+	if (first_time) {
+		//10000回、ランダムに配置可能なマスから調べる
+		for (int i = 0; i < 10000; i++) {
+			int idx = rand() % blank_mass_num;
+			Mass& m = board.mass_[y_table[idx]][x_table[idx]];
+
+			//ランダムなマスに配置した際の勝敗を求める
+			m.setStatus(current);
+			int dummy;
+			int score = -evaluate(false , board, next, dummy, dummy);
+			m.setStatus(Mass::BLANK);
+
+			//勝敗判定
+			if (0 <= score) {
+				wins[idx]++;
+			}
+			else {
+				loses[idx]++;
+			}
+		}
+		int score_max = -9999;
+		for (int idx = 0; idx < blank_mass_num; idx++) {
+			int score = wins[idx] + loses[idx];
+			if (0 != score) {
+				//配置した数(勝ち負けの合計)に対して、勝率を求める
+				score = 100 * wins[idx] / score;
+			}
+			if (score_max < score)//今回評価したスコアの方が大きいなら更新
+			{
+				score_max = score;
+				best_x = x_table[idx];
+				best_y = y_table[idx];
+
+			}
+			std::cout << x_table[idx] + 1 << (char)('a' + y_table[idx]) << " score::" << score << "\n";
+		}
+
+		return score_max;
+	}
+	
+	//firstTimeではないので、勝敗をカウントはしない、勝率も求めない
+	//ただこのノードにおける残りの空きますに配置した時の評価を求める
+	int idx = rand() % blank_mass_num;
+	Mass &m = board.mass_[y_table[idx]][x_table[idx]];
+	m.setStatus(current);
+	int dummy_x,dummy_y;
+	int score = -evaluate(false, board, next, dummy_x, dummy_y);
+	m.setStatus(Mass::BLANK);
+
+	return score;
+}
+bool AI_monte_carlo::think(Board& b)
 {
-	int x = -1, y=0;
-	evaluate(b, Mass::status::ENEMY, x, y);
+	int best_x = -1, best_y = 0;
+	calcCount = 0;
+	evaluate(true, b, Mass::ENEMY, best_x, best_y);
+
+	std::cout << "evaluate内のループの中が呼ばれた回数は: " << calcCount << std::endl;
+	//
+
+	if (best_x < 0) return false;
+	return b.mass_[best_y][best_x].put(Mass::ENEMY);
+}
+
+
+bool AI_negaMax_alpha::think(Board& b)
+{
+	int x = -1, y = 0;
+	calcCount = 0;
+	evaluate(b, Mass::status::ENEMY, x, y, -10001, 10001);
+
+	std::cout << "evaluate内のループの中が呼ばれた回数は: " << calcCount << std::endl;
+	//9293回～10092回
 
 	if (x < 0) return false;
 	return b.mass_[x][y].put(Mass::ENEMY);
 }
 
-
 class Game
 {
 private:
-	const AI::type ai_type = AI::TYPE_NEGAMAX;
+	const AI::type ai_type = AI::TYPE_MONTE_CARLO;
 
 	Board board_;
 	Board::WINNER winner_ = Board::NOT_FINISED;
